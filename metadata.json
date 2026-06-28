@@ -1,0 +1,6 @@
+{
+  "name": "DeCo-Supply",
+  "description": "Zero-Trust Multi-Agent Supply Chain Negotiation on the Aicoo Protocol",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
