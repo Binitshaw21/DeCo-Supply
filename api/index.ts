@@ -1,18 +1,14 @@
 import express from "express";
-import path from "path";
-import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import Razorpay from "razorpay";
 import crypto from "crypto";
-import { getDb } from "./db";
-import { PurchaseOrder } from "./src/types";
+import { sql } from "@vercel/postgres";
+import { PurchaseOrder } from "../src/types";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
-
-const PORT = process.env.PORT || 3000;
 
 // Initialize Razorpay
 const razorpayInstance = process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET 
@@ -35,8 +31,29 @@ let currentVendorB = {
   minPrice: 780,
 };
 
-// API Route: Get currently active secret settings
-app.get("/api/config", (req, res) => {
+const apiRouter = express.Router();
+
+// Helper route to initialize Vercel Postgres table
+apiRouter.get("/init-db", async (req, res) => {
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS payments (
+        id SERIAL PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        payment_id TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        currency TEXT NOT NULL,
+        user_email TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+    res.json({ success: true, message: "Postgres table 'payments' created or verified." });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to initialize table", details: error });
+  }
+});
+
+apiRouter.get("/config", (req, res) => {
   const hasAicooApiKey = !!process.env.AICOO_API_KEY && process.env.AICOO_API_KEY !== "MY_AICOO_API_KEY" && process.env.AICOO_API_KEY !== "";
   res.json({
     vendorA: currentVendorA,
@@ -45,8 +62,7 @@ app.get("/api/config", (req, res) => {
   });
 });
 
-// API Route: Save customized vendor settings
-app.post("/api/config", (req, res) => {
+apiRouter.post("/config", (req, res) => {
   const { vendorA, vendorB } = req.body;
   if (vendorA) {
     currentVendorA = {
@@ -65,13 +81,11 @@ app.post("/api/config", (req, res) => {
   res.json({ success: true, vendorA: currentVendorA, vendorB: currentVendorB });
 });
 
-// High-fidelity fallback local negotiation engine
 function simulateLocalNegotiation(
   prompt: string,
   vA: typeof currentVendorA,
   vB: typeof currentVendorB
 ) {
-  // Regex parsing of quantity and budget
   let quantity = 5000;
   let totalBudget = 4000000;
 
@@ -87,7 +101,7 @@ function simulateLocalNegotiation(
     if (prompt.toLowerCase().includes('million') || prompt.toLowerCase().includes(' m ')) {
       totalBudget = numericVal * 1000000;
     } else if (numericVal < 1000) {
-      totalBudget = numericVal * 1000000; // Assume millions for standard human entries e.g. "under 4"
+      totalBudget = numericVal * 1000000; 
     } else {
       totalBudget = numericVal;
     }
@@ -97,11 +111,9 @@ function simulateLocalNegotiation(
   const hashSeed = Math.random().toString(36).substring(2, 15);
   const cryptoHash = `aicoo_sec_hash_${Buffer.from(hashSeed).toString('hex').slice(0, 16)}`;
 
-  // Determine strategic negotiation paths based on min prices and target unit price
   const logs: any[] = [];
   const hasAicooApiKey = !!process.env.AICOO_API_KEY && process.env.AICOO_API_KEY !== "MY_AICOO_API_KEY" && process.env.AICOO_API_KEY !== "";
   
-  // Auth system message
   if (hasAicooApiKey) {
     const obscuredKey = process.env.AICOO_API_KEY ? `${process.env.AICOO_API_KEY.substring(0, 8)}...` : '';
     logs.push({
@@ -123,7 +135,6 @@ function simulateLocalNegotiation(
     });
   }
 
-  // Base broadcast
   logs.push({
     id: "1",
     timestamp: new Date().toLocaleTimeString(),
@@ -133,7 +144,6 @@ function simulateLocalNegotiation(
     message: `Broadcasting RFP: Need ${quantity.toLocaleString()} GPUs. Max target budget is $${totalBudget.toLocaleString()} ($${targetUnitPrice}/each). Enforcing zero-trust context isolation.`,
   });
 
-  // Vendor A Round 1
   const vA_canSupply = vA.inventory >= quantity;
   const vA_initialOfferPrice = Math.max(vA.publicPrice - 30, targetUnitPrice + 40);
   logs.push({
@@ -142,7 +152,7 @@ function simulateLocalNegotiation(
     actor: "vendor_a",
     actorName: "Vendor A Agent",
     type: "thinking",
-    message: `[Private Context Cell vA] Received broadcast. Buyer requests ${quantity.toLocaleString()} units. Checked private inventory: ${vA.inventory.toLocaleString()} available (${vA_canSupply ? 'Sufficient' : 'Insufficient'}). Catalog price is $${vA.publicPrice}/each. Absolute secret floor limit is $${vA.minPrice}/each. Target requested price is $${targetUnitPrice}/each. Strategizing first offer to retain margin.`,
+    message: `[Private Context Cell vA] Received broadcast. Buyer requests ${quantity.toLocaleString()} units. Checked private inventory: ${vA.inventory.toLocaleString()} available. Catalog price is $${vA.publicPrice}/each. Absolute secret floor limit is $${vA.minPrice}/each. Target requested price is $${targetUnitPrice}/each.`,
   });
 
   if (vA_canSupply) {
@@ -152,7 +162,7 @@ function simulateLocalNegotiation(
       actor: "vendor_a",
       actorName: "Vendor A Agent",
       type: "proposal",
-      message: `We can fulfill this order of ${quantity.toLocaleString()} units from our inventory. Our special strategic offer is $${vA_initialOfferPrice}/each (total: $${(vA_initialOfferPrice * quantity).toLocaleString()}).`,
+      message: `We can fulfill this order. Strategic offer is $${vA_initialOfferPrice}/each (total: $${(vA_initialOfferPrice * quantity).toLocaleString()}).`,
       meta: { unitPrice: vA_initialOfferPrice, total: vA_initialOfferPrice * quantity }
     });
   } else {
@@ -162,11 +172,10 @@ function simulateLocalNegotiation(
       actor: "vendor_a",
       actorName: "Vendor A Agent",
       type: "proposal",
-      message: `We cannot fulfill this entire order. We only have ${vA.inventory.toLocaleString()} units in current stock. No bid.`,
+      message: `We only have ${vA.inventory.toLocaleString()} units in stock. No bid.`,
     });
   }
 
-  // Vendor B Round 1
   const vB_canSupply = vB.inventory >= quantity;
   const vB_initialOfferPrice = Math.max(vB.publicPrice - 20, targetUnitPrice + 20);
   logs.push({
@@ -175,7 +184,7 @@ function simulateLocalNegotiation(
     actor: "vendor_b",
     actorName: "Vendor B Agent",
     type: "thinking",
-    message: `[Private Context Cell vB] RFP received. Buyer requests ${quantity.toLocaleString()} units. Inventory check: ${vB.inventory.toLocaleString()} units in stock (${vB_canSupply ? 'Sufficient' : 'Insufficient'}). Public price: $${vB.publicPrice}/each. Private minimum limit: $${vB.minPrice}/each. Target unit price requested is $${targetUnitPrice}/each. Generating optimized target offer.`,
+    message: `[Private Context Cell vB] RFP received. Buyer requests ${quantity.toLocaleString()} units. Inventory check: ${vB.inventory.toLocaleString()} available. Public price: $${vB.publicPrice}/each. Private minimum limit: $${vB.minPrice}/each. Generating optimized target offer.`,
   });
 
   if (vB_canSupply) {
@@ -185,7 +194,7 @@ function simulateLocalNegotiation(
       actor: "vendor_b",
       actorName: "Vendor B Agent",
       type: "proposal",
-      message: `We have sufficient inventory (${vB.inventory.toLocaleString()} units). We offer our high-performance chips at a bulk discounted price of $${vB_initialOfferPrice}/each (total: $${(vB_initialOfferPrice * quantity).toLocaleString()}).`,
+      message: `We have sufficient inventory. Discounted price of $${vB_initialOfferPrice}/each (total: $${(vB_initialOfferPrice * quantity).toLocaleString()}).`,
       meta: { unitPrice: vB_initialOfferPrice, total: vB_initialOfferPrice * quantity }
     });
   } else {
@@ -195,21 +204,17 @@ function simulateLocalNegotiation(
       actor: "vendor_b",
       actorName: "Vendor B Agent",
       type: "proposal",
-      message: `Inventory alert: ${vB.inventory.toLocaleString()} available. Request requires ${quantity.toLocaleString()} units. Bid declined.`,
+      message: `Inventory alert: ${vB.inventory.toLocaleString()} available. Bid declined.`,
     });
   }
 
-  // Buyer Agent Analysis & Counter Offer
   logs.push({
     id: "6",
     timestamp: new Date().toLocaleTimeString(),
     actor: "buyer",
     actorName: "Buyer Agent",
     type: "thinking",
-    message: `Analyzing Round 1 bids. Target target price is $${targetUnitPrice}/each.
-- Vendor A offer: $${vA_canSupply ? `$${vA_initialOfferPrice}` : 'N/A'} (Diff: ${vA_canSupply ? `$${vA_initialOfferPrice - targetUnitPrice}` : 'N/A'} above target).
-- Vendor B offer: $${vB_canSupply ? `$${vB_initialOfferPrice}` : 'N/A'} (Diff: ${vB_canSupply ? `$${vB_initialOfferPrice - targetUnitPrice}` : 'N/A'} above target).
-Both offers are above target. Initiating secure counter-offer protocol: demanding $${targetUnitPrice}/each as target or competitive pricing down to $${Math.round(targetUnitPrice * 0.98)}/each.`,
+    message: `Analyzing Round 1 bids. Target target price is $${targetUnitPrice}/each. Initiating counter-offer: demanding $${targetUnitPrice}/each as target or competitive pricing down to $${Math.round(targetUnitPrice * 0.98)}/each.`,
   });
 
   const buyerCounterPrice = Math.round(targetUnitPrice);
@@ -219,27 +224,15 @@ Both offers are above target. Initiating secure counter-offer protocol: demandin
     actor: "buyer",
     actorName: "Buyer Agent",
     type: "counter",
-    message: `Thank you for your initial proposals. To close this deal immediately, we are issuing a final unified counter-offer of exactly $${buyerCounterPrice}/each for ${quantity.toLocaleString()} units. Please respond with your best and final offer.`,
+    message: `Issuing counter-offer of exactly $${buyerCounterPrice}/each for ${quantity.toLocaleString()} units. Please respond with final offer.`,
   });
 
-  // Vendor A Round 2 Response
   let vA_finalPrice = vA_initialOfferPrice;
   let vA_accepted = false;
   if (vA_canSupply) {
-    // Strategic offer: If buyer counter ($800) is greater than private minimum ($750), they can accept it or squeeze slightly to beat Vendor B
-    // Let's say Vendor A drops to $790 (profitable since min is $750)
     const vA_strategicMatch = Math.max(vA.minPrice + 15, buyerCounterPrice - 10);
     vA_accepted = vA_strategicMatch >= vA.minPrice;
     vA_finalPrice = vA_accepted ? vA_strategicMatch : vA.publicPrice;
-
-    logs.push({
-      id: "8",
-      timestamp: new Date().toLocaleTimeString(),
-      actor: "vendor_a",
-      actorName: "Vendor A Agent",
-      type: "thinking",
-      message: `[Private Context Cell vA] Buyer counter-offered $${buyerCounterPrice}/each. Private floor is $${vA.minPrice}/each. Profit margin check: $${buyerCounterPrice} is higher than our absolute minimum $${vA.minPrice}. We can adjust down to $${vA_strategicMatch}/each to secure the contract while staying safe.`,
-    });
 
     if (vA_accepted) {
       logs.push({
@@ -248,7 +241,7 @@ Both offers are above target. Initiating secure counter-offer protocol: demandin
         actor: "vendor_a",
         actorName: "Vendor A Agent",
         type: "proposal",
-        message: `Vendor A accepts the challenge. Our absolute best and final offer is $${vA_finalPrice}/each (total: $${(vA_finalPrice * quantity).toLocaleString()}).`,
+        message: `Vendor A accepts. Best and final offer is $${vA_finalPrice}/each.`,
         meta: { unitPrice: vA_finalPrice, total: vA_finalPrice * quantity }
       });
     } else {
@@ -258,29 +251,17 @@ Both offers are above target. Initiating secure counter-offer protocol: demandin
         actor: "vendor_a",
         actorName: "Vendor A Agent",
         type: "proposal",
-        message: `The counter-offer of $${buyerCounterPrice}/each is below our absolute threshold. We must walk away from this negotiation. Our final stands at $${vA_initialOfferPrice}/each.`,
+        message: `Counter-offer is below our threshold. Final stands at $${vA_initialOfferPrice}/each.`,
       });
     }
   }
 
-  // Vendor B Round 2 Response
   let vB_finalPrice = vB_initialOfferPrice;
   let vB_accepted = false;
   if (vB_canSupply) {
-    // Vendor B has minPrice 780. Buyer counter 800.
-    // Strategic B final is say $785
     const vB_strategicMatch = Math.max(vB.minPrice + 5, buyerCounterPrice - 15);
     vB_accepted = vB_strategicMatch >= vB.minPrice;
     vB_finalPrice = vB_accepted ? vB_strategicMatch : vB.publicPrice;
-
-    logs.push({
-      id: "10",
-      timestamp: new Date().toLocaleTimeString(),
-      actor: "vendor_b",
-      actorName: "Vendor B Agent",
-      type: "thinking",
-      message: `[Private Context Cell vB] Received Buyer counter of $${buyerCounterPrice}/each. Absolute minimum floor is $${vB.minPrice}/each. Budget analysis: $${buyerCounterPrice} is above floor. To outbid competitors, we will offer a very tight margin: $${vB_strategicMatch}/each.`,
-    });
 
     if (vB_accepted) {
       logs.push({
@@ -289,7 +270,7 @@ Both offers are above target. Initiating secure counter-offer protocol: demandin
         actor: "vendor_b",
         actorName: "Vendor B Agent",
         type: "proposal",
-        message: `Vendor B has optimized our operations to offer our absolute final price of $${vB_finalPrice}/each (total: $${(vB_finalPrice * quantity).toLocaleString()}).`,
+        message: `Vendor B absolute final price of $${vB_finalPrice}/each.`,
         meta: { unitPrice: vB_finalPrice, total: vB_finalPrice * quantity }
       });
     } else {
@@ -299,23 +280,10 @@ Both offers are above target. Initiating secure counter-offer protocol: demandin
         actor: "vendor_b",
         actorName: "Vendor B Agent",
         type: "proposal",
-        message: `We cannot meet the requested target price of $${buyerCounterPrice}/each. Our final firm offer remains $${vB_initialOfferPrice}/each.`,
+        message: `Cannot meet target price. Firm offer remains $${vB_initialOfferPrice}/each.`,
       });
     }
   }
-
-  // Buyer Agent Final Decision
-  logs.push({
-    id: "12",
-    timestamp: new Date().toLocaleTimeString(),
-    actor: "buyer",
-    actorName: "Buyer Agent",
-    type: "thinking",
-    message: `Finalizing evaluations:
-- Vendor A Final Offer: ${vA_accepted ? `$${vA_finalPrice}/each` : 'Declined / Out of range'}
-- Vendor B Final Offer: ${vB_accepted ? `$${vB_finalPrice}/each` : 'Declined / Out of range'}
-Selecting the lowest priced valid vendor within budget constraint ($${targetUnitPrice}/each).`,
-  });
 
   let winner: 'Vendor A' | 'Vendor B' | null = null;
   let finalUnitPrice = 0;
@@ -361,7 +329,7 @@ Selecting the lowest priced valid vendor within budget constraint ($${targetUnit
       actor: "router",
       actorName: "Aicoo Router",
       type: "crypto",
-      message: `[Consensus Ledger] Generating Zero-Knowledge Commit Hash. Committing secure deal state. Verification Signature: ${cryptoHash}`,
+      message: `[Consensus Ledger] Generating Zero-Knowledge Commit Hash. Verification Signature: ${cryptoHash}`,
     });
 
     logs.push({
@@ -370,7 +338,7 @@ Selecting the lowest priced valid vendor within budget constraint ($${targetUnit
       actor: "buyer",
       actorName: "Buyer Agent",
       type: "agreement",
-      message: `Agreement reached with ${purchaseOrder.vendorName}! Final price: $${finalUnitPrice}/each. Saving a total of $${savings.toLocaleString()} compared to list price. Generating Purchase Order.`,
+      message: `Agreement reached with ${purchaseOrder.vendorName}! Final price: $${finalUnitPrice}/each. Saving a total of $${savings.toLocaleString()}. Generating Purchase Order.`,
     });
 
     return {
@@ -390,7 +358,7 @@ Selecting the lowest priced valid vendor within budget constraint ($${targetUnit
       actor: "buyer",
       actorName: "Buyer Agent",
       type: "agreement",
-      message: `Negotiation aborted. No vendor was able to meet our target price of $${targetUnitPrice}/each without breaching their private margins. Zero-Trust protocol has successfully guarded all private floors from exposure.`,
+      message: `Negotiation aborted. No vendor was able to meet our target price of $${targetUnitPrice}/each without breaching their private margins.`,
     });
 
     return {
@@ -401,51 +369,37 @@ Selecting the lowest priced valid vendor within budget constraint ($${targetUnit
   }
 }
 
-// API Route: Run the actual negotiation (Zero-Trust) via Aicoo Protocol
-app.post("/api/negotiate", async (req, res) => {
+apiRouter.post("/negotiate", async (req, res) => {
   const { prompt, vendorA, vendorB } = req.body;
   if (!prompt) {
     return res.status(400).json({ error: "RFP Prompt is required." });
   }
 
-  const vA = vendorA || currentVendorA;
-  const vB = vendorB || currentVendorB;
+  const result = simulateLocalNegotiation(prompt, vendorA || currentVendorA, vendorB || currentVendorB);
 
-  const aicooKey = process.env.AICOO_API_KEY;
-  const hasAicooApiKey = !!aicooKey && aicooKey !== "MY_AICOO_API_KEY" && aicooKey !== "";
-
-  // Run our high-fidelity, zero-trust multi-agent consensus sandbox engine.
-  // This executes the precise decentralized Aicoo protocol guidelines locally on our node.
-  console.log("Processing zero-trust RFP negotiation via local Aicoo Protocol node...");
-  const result = simulateLocalNegotiation(prompt, vA, vB);
-
-  // If the Aicoo API Key is configured, we inject the live-network cryptographic consensus confirmation.
-  if (hasAicooApiKey) {
-    const obscuredKey = aicooKey ? `${aicooKey.substring(0, 8)}...` : '';
-    
-    // Add the cryptographic handshake & validation signature to represent live gateway routing
+  if (process.env.AICOO_API_KEY && process.env.AICOO_API_KEY !== "MY_AICOO_API_KEY") {
+    const obscuredKey = `${process.env.AICOO_API_KEY.substring(0, 8)}...`;
     result.logs.unshift({
       id: "auth_ok_live",
       timestamp: new Date().toLocaleTimeString(),
       actor: "system",
       actorName: "Aicoo Protocol Gateway",
       type: "crypto",
-      message: `Zero-Knowledge proof committed to Aicoo ledger. Auth Key verified: (${obscuredKey}). Securing tunnel with a zero-trust multi-agent consensus validation.`,
+      message: `Zero-Knowledge proof committed to Aicoo ledger. Auth Key verified: (${obscuredKey}).`,
     });
   }
 
   return res.json(result);
 });
 
-// API Route: Create Razorpay Order
-app.post("/api/create-order", async (req, res) => {
+apiRouter.post("/create-order", async (req, res) => {
   if (!razorpayInstance) {
-    return res.status(500).json({ error: "Razorpay keys not configured in .env." });
+    return res.status(500).json({ error: "Razorpay keys not configured." });
   }
   
   try {
     const options = {
-      amount: req.body.amount || 500000, // e.g. 5000 INR in paise
+      amount: req.body.amount || 500000,
       currency: "INR",
       receipt: `receipt_${Math.floor(Math.random() * 100000)}`
     };
@@ -457,8 +411,7 @@ app.post("/api/create-order", async (req, res) => {
   }
 });
 
-// API Route: Verify Razorpay Payment Signature
-app.post("/api/verify-payment", async (req, res) => {
+apiRouter.post("/verify-payment", async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount, currency, email } = req.body;
   const secret = process.env.RAZORPAY_KEY_SECRET;
 
@@ -471,15 +424,14 @@ app.post("/api/verify-payment", async (req, res) => {
 
   if (generatedSignature === razorpay_signature) {
     try {
-      const db = await getDb();
-      await db.run(
-        `INSERT INTO payments (order_id, payment_id, amount, currency, user_email) VALUES (?, ?, ?, ?, ?)`,
-        [razorpay_order_id, razorpay_payment_id, amount || 500000, currency || 'INR', email || 'anonymous']
-      );
+      // Use Vercel Postgres
+      await sql`
+        INSERT INTO payments (order_id, payment_id, amount, currency, user_email) 
+        VALUES (${razorpay_order_id}, ${razorpay_payment_id}, ${amount || 500000}, ${currency || 'INR'}, ${email || 'anonymous'})
+      `;
       res.json({ status: "ok" });
     } catch (err) {
       console.error("Database insert failed", err);
-      // Even if DB fails, payment was verified, but we return a warning
       res.json({ status: "ok", warning: "Payment verified but DB log failed" });
     }
   } else {
@@ -487,44 +439,24 @@ app.post("/api/verify-payment", async (req, res) => {
   }
 });
 
-// API Route: Get payment invoice history from DB
-app.get("/api/payments", async (req, res) => {
-  const email = req.query.email;
+apiRouter.get("/payments", async (req, res) => {
+  const email = req.query.email as string;
   try {
-    const db = await getDb();
-    let query = `SELECT * FROM payments ORDER BY created_at DESC LIMIT 50`;
-    let params: any[] = [];
+    let result;
     if (email) {
-      query = `SELECT * FROM payments WHERE user_email = ? ORDER BY created_at DESC LIMIT 50`;
-      params.push(email);
+      result = await sql`SELECT * FROM payments WHERE user_email = ${email} ORDER BY created_at DESC LIMIT 50`;
+    } else {
+      result = await sql`SELECT * FROM payments ORDER BY created_at DESC LIMIT 50`;
     }
-    const payments = await db.all(query, params);
-    res.json(payments);
+    res.json(result.rows);
   } catch (err) {
     console.error("Failed to fetch payments", err);
     res.status(500).json({ error: "Failed to fetch payments" });
   }
 });
 
-// Serve frontend assets in production or route to Vite dev server in development
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  }
+// Since Vercel rewrites /api/(.*) to /api/index.ts, the router needs to match /api
+app.use("/api", apiRouter);
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
-}
-
-startServer();
+// Export for Vercel Serverless
+export default app;
