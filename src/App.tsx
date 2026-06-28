@@ -302,8 +302,14 @@ export default function App() {
     if (activeTab === 'billing' && currentUser) {
       fetch(`/api/payments?email=${currentUser.email}`)
         .then(res => res.json())
-        .then(data => setInvoiceHistory(data))
-        .catch(console.error);
+        .then(data => {
+          if (Array.isArray(data)) {
+            setInvoiceHistory(data);
+          } else {
+            console.error("Failed to load invoices:", data);
+            setInvoiceHistory([]);
+          }
+        })
     }
   }, [activeTab, currentUser]);
 
@@ -738,7 +744,14 @@ export default function App() {
             setProofCredits((prev) => prev + 5000);
             fetch(`/api/payments?email=${currentUser?.email}`)
               .then(res => res.json())
-              .then(data => setInvoiceHistory(data))
+              .then(data => {
+                if (Array.isArray(data)) {
+                  setInvoiceHistory(data);
+                } else {
+                  console.error("Failed to load invoices:", data);
+                  setInvoiceHistory([]);
+                }
+              })
               .catch(console.error);
 
             if (currentUser) {
